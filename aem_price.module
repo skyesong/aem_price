@@ -1,0 +1,460 @@
+<?php
+/**
+ * Any webform that AEM needs to accept payments on needs a field with the form key 'amount'.
+ * This can be set as user-defined via text field (as in a donation),
+ * in a select menu (such as selecting ticket prices),
+ * in a hidden field (for a product with a fixed price),
+ * or calculated based on other chosen fields using this module.
+ * 
+ * If calculated, the form needs a hidden 'amount' field that this module can update with the new price.
+ */
+
+/**
+ * Implements hook_webform_submission_insert().
+ */
+
+function aem_price_webform_submission_presave($node, &$submission) {
+	// To-do: work around hard-coding nids
+	if ($node->nid == 24) { //Winter Weekend Workshop Registration
+		$mapping = _aem_price_webform_component_mapping($node);
+		$amount = $submission->data[$mapping['amount']]['value'][0];
+		$tuition = $submission->data[$mapping['tuition']]['value'][0];
+		$deposit = $submission->data[$mapping['deposit']]['value'][0];
+		$dance = $submission->data[$mapping['dance_tuition']]['value'][0];
+		
+		// Determine part-time dance tuition, if set
+		if ($dance) {
+			$tuition = $dance;
+		}
+		
+		// Replace Amount with Deposit, if chosen
+		if ($deposit) {
+			$submission->data[$mapping['amount']]['value'][0] = $deposit;
+		} else {
+			$submission->data[$mapping['amount']]['value'][0] = $tuition;
+		}
+	}
+	
+	if ($node->nid == 630) { //Odhec/Lerma order form
+		$mapping = _aem_price_webform_component_mapping($node);
+		$odhec_qty = $submission->data[$mapping['odhecaton']]['value'][0];
+		$lerma_qty = $submission->data[$mapping['lerma']]['value'][0];
+		$odhec_price = $node->field_publication_odhecaton['und'][0]['value'];
+		$lerma_price = $node->field_publication_lerma['und'][0]['value'];
+		$amount = ($odhec_qty * $odhec_price) + ($lerma_qty * $lerma_price);
+		//Figure Sales Tax
+		$state = $submission->data[$mapping['state']]['value'][0];
+		$shipping_rate = $submission->data[$mapping['shipping_rate']]['value'][0];
+		$sales_tax = _aem_price_webform_tax($amount, $shipping_rate, $state);
+		$submission->data[$mapping['sales_tax']]['value'][0] = $sales_tax;
+		//Figure Shipping
+		$shipping = _aem_price_webform_shipping($odhec_qty, $lerma_qty, $shipping_rate);
+		$submission->data[$mapping['shipping']]['value'][0] = $shipping;
+		//Calculate Total
+		$submission->data[$mapping['amount']]['value'][0] = $amount + $sales_tax + $shipping;
+	}
+	
+	if ($node->nid == 458) { //AEMF Registration
+		$mapping = _aem_price_webform_component_mapping($node);
+		$week = $submission->data[$mapping['week']]['value'][0];
+		$pay = $submission->data[$mapping['i_will_pay']]['value'][0];
+		$program_1 = $submission->data[$mapping['week_one_program']]['value'][0];
+		$program_2 = $submission->data[$mapping['week_two_program']]['value'][0];
+		$part_time = $submission->data[$mapping['part_time']]['value'][0];
+		if ($part_time == 'yes') {
+			$part_time = TRUE;
+			} else {
+			$part_time = FALSE;
+			}
+
+		$amount = 0;
+		
+		//Add week one tuition
+		if ($week == 1 || $week == 3) {
+			if ($part_time == TRUE) {
+				$tuition_1 = $node->field_aemf_half_tuition['und'][0]['value'];
+			} else if ($program_1 == 'central') {
+				$tuition_1 = $node->field_aemf_central_tuition['und'][0]['value'];
+			} else if ($program_1 == 'dance') {
+				$tuition_1 = $node->field_aemf_dance_tuition['und'][0]['value'];
+			} else {
+				$tuition_1 = $node->field_aemf_special_tuition['und'][0]['value'];
+				}
+			
+			$amount += $tuition_1;
+		}
+		
+		//Add week two tuition
+		if ($week == 2 || $week == 3) {
+			if ($part_time == TRUE) {
+				$tuition_2 = $node->field_aemf_half_tuition['und'][0]['value'];
+			} else if ($program_2 == 'central') {
+				$tuition_2 = $node->field_aemf_central_tuition['und'][0]['value'];
+			} else if ($program_2 == 'dance') {
+				$tuition_2 = $node->field_aemf_dance_tuition['und'][0]['value'];
+			} else {
+				$tuition_2 = $node->field_aemf_special_tuition['und'][0]['value'];
+				}
+			
+			$amount += $tuition_2;
+		}
+		
+		//take discount off total if eligible
+		$discount = 0;
+		if ($part_time == FALSE && $week == '3' && $pay == 'full') {
+			$discount = $node->field_aemf_both_week_discount['und'][0]['value'];
+			$amount += $discount;
+			}
+			
+		//Write total tuition owed to submission
+		$submission->data[$mapping['tuition_due']]['value'][0] = $amount;
+
+		//Figure registration fee
+		$registration = 0;
+		$deadline_0 = strtotime($node->field_aemf_registration_date_0['und'][0]['safe_value']);
+		$deadline_1 = strtotime($node->field_aemf_registration_date_1['und'][0]['safe_value']);
+		$deadline_2 = strtotime($node->field_aemf_registration_date_2['und'][0]['safe_value']);
+		$today = strtotime('today');
+
+		if ($deadline_0 <= $today && $deadline_1 >= $today) {
+			if ($pay == 'full') {
+				$registration = 0;
+				} else {
+				$registration = $node->field_aemf_registration_fee_1['und'][0]['value'];
+				}
+			}
+		if ($deadline_2 >= $today && $deadline_1 < $today) {
+			$registration = $node->field_aemf_registration_fee_1['und'][0]['value']; 
+			}
+		if ($deadline_2 < $today) {
+			$registration = $node->field_aemf_registration_fee_2['und'][0]['value'];
+			}
+		$submission->data[$mapping['registration_due']]['value'][0] = $registration;
+		$amount += $registration;
+			
+		//if paying a deposit or registration only, replace amount
+		if (($week == 1 || $week == 2) && $pay == 'deposit') {
+			$amount = 100 + $registration;
+		} else if ($week == 3 && $pay == 'deposit') {
+			$amount = 200 + $registration;
+			} else if ($pay == 'reg_only') {
+			$amount = $registration;
+			if ($amount == 0) {
+				$registration = $node->field_aemf_registration_fee_1['und'][0]['value'];
+				$amount = $registration;
+				$submission->data[$mapping['registration_due']]['value'][0] = $registration;
+				}
+			}
+		
+		//Add commuter fee if set
+		if ($submission->data[$mapping['commuter_fee']]['value'][0]) {
+			$amount +=$submission->data[$mapping['commuter_fee']]['value'][0];
+		}
+		
+		//Write total back to submission
+		$submission->data[$mapping['amount']]['value'][0] = $amount;
+	}
+	
+	if ($node->nid == 463) { //AEMF Housing
+		$mapping = _aem_price_webform_component_mapping($node);
+		
+	  	// get rates
+		$budget_week = $node->field_aemf_budget_week['und'][0]['value'];
+		$budget_plus_week = $node->field_aemf_budget_plus_week['und'][0]['value'];
+		$standard_week = $node->field_aemf_standard_week['und'][0]['value'];
+		$meal_card = $node->field_aemf_meal_card['und'][0]['value'];
+		$budget_transient = $node->field_aemf_budget_transient['und'][0]['value'];
+		$budget_plus_transient = $node->field_aemf_budget_plus_transient['und'][0]['value'];
+		$standard_transient = $node->field_aemf_standard_transient['und'][0]['value'];
+		
+		// get nights
+		$check_in = $submission->data[$mapping['check_in']]['value'][0];
+		$check_out = $submission->data[$mapping['check_out']]['value'][0];
+		$check_in = strtotime($check_in);
+		$check_out = strtotime($check_out);
+		
+		// calculate number of nights
+		$checkin = abs($check_in)/86400;
+		$checkout = abs($check_out)/86400;
+		$nights = abs($checkout - $checkin);
+		$weeks = floor($nights/7);
+		$addlnights = $nights % 7;
+		
+		// get housing type
+		$type = $submission->data[$mapping['housing_type']]['value'][0];
+		
+		
+		
+		// calculate housing price
+		$total = 0;
+		$allweeks = $weeks;
+		if ($type == 'standard') {
+			$rate = $standard_week;
+			$nightrate = $standard_transient;
+			$total = ($weeks * $standard_week) + ($addlnights * $standard_transient);
+			if ($total > ($weeks+1) * $standard_week) {
+				$total = ($weeks+1) * $standard_week;
+				$allweeks = $weeks+1;
+				$addlnights = 0;
+				}
+		} else if ($type == 'budget') {
+			$total = ($weeks * $budget_week) + ($addlnights * $budget_transient);
+			$rate = $budget_week;
+			$nightrate = $budget_transient;
+			if ($total > ($weeks+1) * $budget_week) {
+				$total = ($weeks+1) * $budget_week;
+				$allweeks = $weeks+1;
+				$addlnights = 0;
+				}
+		} else if ($type == 'budgetplus') {
+			$total = ($weeks * $budget_plus_week) + ($addlnights * $budget_plus_transient);
+			$rate = $budget_plus_week;
+			$nightrate = $budget_plus_transient;
+			if ($total > ($weeks+1) * $budget_plus_week) {
+				$total = ($weeks+1) * $budget_plus_week;
+				$allweeks = $weeks+1;
+				$addlnights = 0;
+				}
+		}
+		
+		// add meal card if chosen
+		$meal_line = "";
+		switch ($submission->data[$mapping['meal_card']]['value'][0]) {
+			case "Week_1":
+				$total += $meal_card;
+				$meal_line = "3<|>Meal Card Week One<|><|>1<|>" .$meal_card. "<|>N";
+				break;
+			case "Week_1_early":
+				$total += $meal_card;
+				$meal_line = "3<|>Meal Card Week One<|>early arrival<|>1<|>" .$meal_card. "<|>N";
+				break;
+			case "Week_2":
+				$total += $meal_card;
+				$meal_line = "3<|>Meal Card Week Two<|><|>1<|>" .$meal_card. "<|>N";
+				break;
+			case "Both_weeks":
+				$total += 2*$meal_card;
+				$meal_line = "3<|>Meal Card Both Weeks<|><|>2<|>" .$meal_card. "<|>N";
+				break;
+			default:
+				break;
+		}
+		
+		// write total due back to submission
+		$submission->data[$mapping['total_due']]['value'][0] = $total;
+		$submission->data[$mapping['amount']]['value'][0] = $total;
+		
+		// set up line items
+		$line_items = '';
+		if ($allweeks > 0) { 
+			$line_items .= "1<|>Weeks<|>" . $type . "<|>" . $allweeks . "<|>" .$rate. "<|>N";
+			}
+		if ($allweeks > 0 && $addlnights > 0) {
+			$line_items .= "&x_line_item=";
+			}
+		if ($addlnights > 0) {
+			$line_items .= "2<|>Nights<|>" . $type . "<|>" . $addlnights . "<|>" .$nightrate. "<|>N";
+			}
+		if (($allweeks > 0 || $addlnights > 0) && $meal_line) {
+			$line_items .= "&x_line_item=";
+		}
+		if ($submission->data[$mapping['meal_card']]['value'][0] && $meal_line) {
+			
+			$line_items .= $meal_line;
+			}
+			
+		//add dates as blank line item
+		$ci_date = date("n-j-Y", $check_in);
+		$co_date = date("n-j-Y", $check_out);
+		$date_line = "&x_line_item=4<|>Dates<|>". $ci_date . " - " . $co_date . "<|>1<|>0<|>N";
+		$line_items .= $date_line;
+		$submission->data[$mapping['line_items']]['value'][0] = $line_items;
+  		
+  		// replace amount with deposit if chosen
+		$pay = $submission->data[$mapping['i_will_pay']]['value'][0];
+		if ($pay != 'full' && $pay) {
+			$submission->data[$mapping['amount']]['value'][0] = $submission->data[$mapping['i_will_pay']]['value'][0];
+			$submission->data[$mapping['line_items']]['value'][0] = "1<|>deposit<|>Deposit<|>1<|>" . $pay . "<|>N" . $date_line;
+			
+		} 
+	}
+	
+	if ($node->nid == 649) { //MDW Registration
+		$mapping = _aem_price_webform_component_mapping($node);
+		
+		// get rates
+		$tuition_full = $node->field_weekend_full_tuition['und'][0]['value'];
+		$tuition_pt = $node->field_weekend_part_time_tuition['und'][0]['value'];
+		$tuition_ws = $node->field_weekend_work_study_tuition['und'][0]['value'];
+		$housing_double = $node->field_weekend_housing_double['und'][0]['value'];
+		$housing_single = $node->field_weekend_housing_single['und'][0]['value'];
+		$housing_double_pre = $node->field_weekend_premium_double['und'][0]['value'];
+		$housing_single_pre = $node->field_weekend_premium_single['und'][0]['value'];
+		$commuter = $node->field_weekend_commuter_fee['und'][0]['value'];
+		
+		// get selections
+		$tuition = $submission->data[$mapping['tuition']]['value'][0];
+		$housing = $submission->data[$mapping['housing']]['value'][0];
+		
+		// calculate
+		$amount = 0;
+		$line_items = "";
+		switch ($tuition) {
+			case "full":
+				$amount = $tuition_full;
+				$line_items = "1<|>Tuition<|>Full Time<|>1<|>" . $tuition_full . "<|>N";
+				break;
+				
+			case "part":
+				$amount = $tuition_pt;
+				$line_items = "1<|>Tuition<|>Part Time<|>1<|>" . $tuition_pt . "<|>N";
+				break;
+				
+			case "workstudy":
+				$amount = $tuition_ws;
+				$line_items = "1<|>Tuition<|>Work Study<|>1<|>" . $tuition_ws . "<|>N";
+				break;
+		}
+		$line_items .= "&x_line_item=";
+		switch ($housing) {
+			case "commuter":
+				$amount += $commuter;
+				$line_items .= "2<|>Housing<|>Commuter<|>1<|>" . $commuter . "<|>N";
+				break;
+			case "double":
+				$amount += $housing_double;
+				$line_items .= "2<|>Housing<|>Double Room, shared bath<|>1<|>" . $housing_double . "<|>N";
+				break;
+			case "single":
+				$amount += $housing_single;
+				$line_items .= "2<|>Housing<|>Single Room, shared bath<|>1<|>" . $housing_single . "<|>N";
+				break;
+			case "premium_double":
+				$amount += $housing_double_pre;
+				$line_items .= "2<|>Housing<|>Double Room, private bath<|>1<|>" . $housing_double_pre . "<|>N";
+				break;
+			case "premium_single":
+				$amount += $housing_single_pre;
+				$line_items .= "2<|>Housing<|>Single Room, private bath<|>1<|>" . $housing_single_pre . "<|>N";
+				break;
+		}
+		$submission->data[$mapping['amount']]['value'][0] = $amount;
+		$submission->data[$mapping['total']]['value'][0] = $amount;
+		$submission->data[$mapping['line_items']]['value'][0] = $line_items;
+		
+		// replace amount with deposit if chosen
+		$pay = $submission->data[$mapping['i_will_pay']]['value'][0];
+		if ($pay != 'full' && $pay) {
+			$submission->data[$mapping['amount']]['value'][0] = $submission->data[$mapping['i_will_pay']]['value'][0];
+			$submission->data[$mapping['line_items']]['value'][0] = "1<|>Deposit<|>Tuition: ".$tuition."; Housing: ".$housing."<|>1<|>" . $pay . "<|>N";
+		}
+	}
+}
+
+/**
+ * Function to convert webform submissions into a nicely-mapped array.
+ *
+ * @see http://www.drupalcoder.com/story/678-additional-processing-in-drupals-webform-3-module
+ * @param unknown $node
+ * @return unknown
+ */
+function _aem_price_webform_component_mapping($node) {
+	$mapping = array();	$components = $node->webform['components'];
+	foreach ($components as $i => $component) {
+		$key = $component['form_key'];
+		$mapping[$key] = $i;	
+	}
+
+	return $mapping;
+}
+
+function _aem_price_webform_tax($amount, $shipping_rate, $state) {
+	if ($shipping_rate == "pick_up" || ($shipping_rate == "media" && $state == "MA") ) {
+		$tax = round($amount * .0625, 2);
+	} else {
+		$tax = 0;
+	}
+	return $tax;
+}
+
+function _aem_price_webform_shipping($odhec_qty, $lerma_qty, $shipping_rate) {
+	$shipping = 0;
+	$total_qty = $odhec_qty + $lerma_qty;
+	if ($shipping_rate == "media") {
+		switch ($total_qty) {
+    case 0:
+        $shipping = 0;
+        break;
+    case 1:
+        $shipping = 5;
+        break;
+    case 2:
+        $shipping = 7;
+        break;
+    case 3:
+        $shipping = 9;
+        break;
+    case 4:
+        $shipping = 13;
+        break;
+    case 5:
+        $shipping = 15;
+        break;
+    case 6:
+        $shipping = 17;
+        break;
+		}
+	} else if ($shipping_rate == "canada") {
+		switch ($total_qty) {
+    case 0:
+        $shipping = 0;
+        break;
+    case 1:
+        $shipping = 21;
+        break;
+    case 2:
+        $shipping = 42;
+        break;
+    case 3:
+        $shipping = 49;
+        break;
+    case 4:
+        $shipping = 70;
+        break;
+    case 5:
+        $shipping = 91;
+        break;
+    case 6:
+        $shipping = 98;
+        break;
+		}
+	} else if ($shipping_rate == "intl") {
+		switch ($total_qty) {
+    case 0:
+        $shipping = 0;
+        break;
+    case 1:
+        $shipping = 33;
+        break;
+    case 2:
+        $shipping = 62;
+        break;
+    case 3:
+        $shipping = 70;
+        break;
+    case 4:
+        $shipping = 103;
+        break;
+    case 5:
+        $shipping = 132;
+        break;
+    case 6:
+        $shipping = 140;
+        break;
+		}
+	} else {
+		$shipping = 0;
+	}
+	return $shipping;
+}
+?>
